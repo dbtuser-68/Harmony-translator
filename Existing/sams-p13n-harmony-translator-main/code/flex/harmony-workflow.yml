@@ -1,0 +1,87 @@
+main:
+  params: [ event ]
+  steps:
+    - log_event:
+        call: sys.log
+        args:
+          text: ${event.data}
+          severity: INFO
+    - extract_bucket_object:
+        assign:
+          - bucket: ${event.data.bucket}
+          - object: ${event.data.name}
+    - read_from_gcs_bucket:
+        call: googleapis.storage.v1.objects.get
+        args:
+          bucket: ${bucket}
+          object: ${object}
+          alt: "media"
+        result: gcs_result
+        next: init
+    - init:
+        assign:
+          - requestPayloadList: ${text.split(text.decode(gcs_result),"\n")}
+          - project: "sams-personalization-nba-dev"
+          - location: "us-central1"
+          - serviceAccountEmail: "svc-deploy-mgmt@sams-personalization-nba-dev.iam.gserviceaccount.com"
+          - outputParquetPath: ${sys.get_env("OUTPUT_FILE_PATH")}
+          - jobName: "harmony-job"
+          - templatePath: "gs://sams-personalization-nba-dev-export-bucket/harmony/harmony_template.json"
+          - currentStatus: ""
+          - input: ""
+          - workflowResponse: [ ]
+          - currentDate: ${text.substring(time.format(sys.now()), 0, 10)}
+    - readRequestPayload:
+        for:
+          value: requestPayload
+          in: ${requestPayloadList}
+          steps:
+            - validateRequest:
+                switch:
+                  - condition: ${ requestPayload != "" }
+                    steps:
+                      - stepRequestValidation:
+                          assign:
+                            - input: ${json.decode(requestPayload)}
+                      - logRequest:
+                          call: sys.log
+                          args:
+                            text: ${json.decode(requestPayload)}
+                            severity: INFO
+                      - retrieve_attributes:
+                          assign:
+                            - file_path: ${input.filepath}
+                            - module: ${input.module}
+                            - feed_type: ${input.feed_type}
+                    next: checkModuleType
+            - checkModuleType:
+                switch:
+                  - condition: ${feed_type == "warm-start"}
+                    steps:
+                      - stepFeed:
+                          switch:
+                            - condition: ${module == "rye"}
+                              steps:
+                                - stepRye:
+                                    assign:
+                                      - processorVarWriteToCosmos: "Y"
+                                      - outPutFilePath: ${outputParquetPath + "/" + currentDate + "/"}
+                                      - file_path: ${file_path + "/*.parquet"}
+                              next: run_dataflow
+            - run_dataflow:
+                call: googleapis.dataflow.v1b3.projects.locations.flexTemplates.launch
+                args:
+                  projectId: ${project}
+                  location: ${location}
+                  body:
+                    launchParameter:
+                      jobName: ${jobName}
+                      containerSpecGcsPath: ${templatePath}
+                      parameters:
+                        input_parquet_path: ${file_path}
+                        output_parquet_path: ${outPutFilePath}
+                      environment:
+                        serviceAccountEmail: ${serviceAccountEmail}
+                result: job
+            - return:
+                return: ${job}               

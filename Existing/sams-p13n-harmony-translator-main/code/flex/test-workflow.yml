@@ -1,0 +1,32 @@
+main:
+  params: [args]
+  steps:
+    - init:
+        assign:
+          - project: "sams-personalization-nba-dev"
+          - location: "us-central1"
+          - templatePath: "gs://sams-personalization-nba-dev-export-bucket/harmony_poc/harmony.json"
+          - currentTime: "fixed-time"  
+          - jobName: "test-harmony-job"  
+          - serviceAccountEmail: "svc-deploy-mgmt@sams-personalization-nba-dev.iam.gserviceaccount.com"
+          - inputParquetPath: ${args.inputParquetPath}
+          - outputParquetPath: ${args.outputParquetPath}
+    - run_dataflow:
+        call: googleapis.dataflow.v1b3.projects.locations.flexTemplates.launch
+        args:
+          projectId: ${project}
+          location: ${location}
+          body:
+            launchParameter:
+              jobName: ${jobName}
+              containerSpecGcsPath: ${templatePath}
+              parameters:
+                input_parquet_path: ${inputParquetPath}
+                output_parquet_path: ${outputParquetPath}
+              environment:
+                serviceAccountEmail: ${serviceAccountEmail}
+                additionalUserLabels:
+                  env: "dev"
+        result: job
+    - return:
+        return: ${job}

@@ -1,0 +1,20 @@
+{
+    "name": "My Dataflow Job",
+    "description": "This Flex Template processes data using a Dataflow job.",
+    "parameters": [
+      {
+        "name": "input_parquet_path",
+        "label": "Input Parquet File Path",
+        "helpText": "GCS path to the input Parquet file",
+        "paramType": "TEXT",
+        "isOptional": false
+      },
+      {
+        "name": "output_parquet_path",
+        "label": "Output Parquet File Path",
+        "helpText": "GCS path to the output Parquet file",
+        "paramType": "TEXT",
+        "isOptional": false
+      }
+    ]
+  }
