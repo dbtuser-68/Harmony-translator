@@ -1,0 +1,155 @@
+configuration:
+  dependencies:
+    - mvn://com.walmartlabs.concord.plugins:git:0.62.0
+    - mvn://com.walmartlabs.concord.plugins:servicenow-task:latest
+  arguments:
+    project: "sams-p13n-harmony-translator"
+    dev_gcp_secrets_file: "/workspace/${crypto.exportAsFile('RSCE', 'sams_dev_personalization_sa_json', null)}"
+    stage_gcp_secrets_file: "/workspace/${crypto.exportAsFile('RSCE', 'sams_stage_recommendation_processor_sa_json', null)}"
+    prod_gcp_secrets_file: "/workspace/${crypto.exportAsFile('RSCE', 'sams_prod_recommendation_processor_sa_json', null)}"
+    release_version: "0.0.4"
+    vpc_sub_network: "https://www.googleapis.com/compute/v1/projects/shared-vpc-admin/regions/us-central1/subnetworks/priv-svc-access-01"
+    location: "us-central1"
+    dev:
+      project_name: "sams-personalization-nba-dev"
+      service_account: "svc-deploy-mgmt@sams-personalization-nba-dev.iam.gserviceaccount.com"
+      gcs_build_log_dir: "gs://sams-personalization-nba-dev-export-bucket/harmony/logs"
+    # stage:
+    #   project_name: "stage-recommendation-processor"
+    #   service_account: "svc-deploy-mgmt@stage-recommendation-processor.iam.gserviceaccount.com"
+    #   gcs_build_log_dir: "gs://reco-processor-logs/flex-template/logs"
+    # prod:
+    #   project_name: "prod-recommendation-processor"
+    #   service_account: "svc-deploy-mgmt@prod-recommendation-processor.iam.gserviceaccount.com"
+    #   gcs_build_log_dir: "gs://prod_reco_processor_cloud_build_logs/flex-template/logs"
+
+forms:
+  harmonyTranslatorDeployForm:
+    - environment: {label : "Environment to Deploy Dev or Stage or Prod", type: "string", allow: ["dev", "stage", "prod"]}
+  configForm:
+    - crqNumber: { label: "CRQ Number", type: "string" }
+
+triggers:
+  - manual:
+      name: Build Flex Template in GCP
+      entryPoint: deployToGCP
+
+
+#   - github:
+#       useInitiator: true
+#       entryPoint: deployToGCP
+#       conditions:
+#         type: push
+#         branch: "main"
+
+flows:
+  default:
+    - log: "-----------on Push to master branch-----------"
+    - log: "Project: ${project}"
+    - call: deployToGCP
+
+  deployToGCP:
+    - form: harmonyTranslatorDeployForm
+    - log: "Project: ${project}"
+    - log: "Project: ${harmonyTranslatorDeployForm.environment}"
+    - checkpoint: "Calling Child Concord"
+    - task: concord
+      in:
+        org: "RSCE"
+        action: start
+        project: "Sams-Harmony-Translator"
+        repo: "harmony-translator"
+        repoBranchOrTag: "main"
+        entryPoint: "deployProcessor"
+        arguments:
+          environment: ${harmonyTranslatorDeployForm.environment}
+
+
+
+  deployProcessor:
+    - switch: ${environment}
+      dev:
+        - log: "Env is Dev : ${dev.project_name}"
+        - set: 
+            secret_file: ${dev_gcp_secrets_file}
+            project_name: "${dev.project_name}"
+            gcs_build_log_dir: ${dev.gcs_build_log_dir}
+            service_account: ${dev.service_account}
+            environment: "dev"
+        - call: flexDeploy
+      stage:
+        - log: "Env is Stage : ${stage.project_name}"
+        - log: "Log Storage Location : ${stage.gcs_build_log_dir}"
+        - set: 
+            secret_file: ${stage_gcp_secrets_file}
+            project_name: ${stage.project_name}
+            service_account: ${stage.service_account}
+            environment: "stage"
+        - call: flexDeploy
+      prod:
+        - log: "Env is Prod : ${prod.project_name}"
+        - form: configForm
+        - task: servicenow
+          in:
+            action: getChange
+            changeRecordId: ${configForm.crqNumber}
+          out:
+            changeInfo: '${result}'
+        - if: ${changeInfo.State == "Implement"}
+          then:
+            - log: "Change is valid, proceeding for the deployment"
+            - checkpoint: "Calling Child Concord For Prod Deployment"
+            - task: concord
+              in:
+                org: "RSCE"
+                action: start
+                project: "Sams-Harmony-Translator"
+                repo: "harmony-translator"
+                repoBranchOrTag: "main"
+                entryPoint: "prodDeploy"
+                arguments:
+                  changeInfo: ${changeInfo.State}
+
+          else:
+            - log: "Change is invalid! Change state: ${changeInfo.State}"
+            - task: slack
+              in:
+                title: "Deployment failed"
+                ignoreErrors: true
+                channelId: "C06A63M61GW"
+                username: "sams-p13n-recommendation-processor"
+                iconEmoji: ":erroredresponse:"
+                text: "Prod reco pipeline deployment failed due to CRQ, process ID ${txId}"
+                out: result
+
+            - if: "${!result.ok}"
+              then:
+                - log: "Error while sending a message: ${result.error}"
+            - throw: "Change record is currently in state: ${changeInfo.State} ... All prod deployments must be in Implement state."
+
+  prodDeploy:
+    - log: "Change Info is in:${changeInfo} State Deploying To Prod"
+    - set:
+        secret_file: ${prod_gcp_secrets_file}
+        project_name: ${prod.project_name}
+        service_account: ${prod.service_account}
+        environment: "prod"
+    - call: flexDeploy
+        
+
+  flexDeploy:
+      - docker: docker.prod.walmart.com/cloud-at-walmart/pubcloud-mgmt-tooling:latest
+        env:
+          GOOGLE_CREDENTIALS: ${secret_file}
+          PROJECT_NAME : ${project_name}
+          LOCATION: ${location}
+          GCS_BUILD_LOG_DIR: ${gcs_build_log_dir}
+          VPC_SUB_NETWORK: ${vpc_sub_network}
+          SERVICE_ACCOUNT: ${service_account}
+          RELEASE_VERSION: ${release_version}
+          ENVIRONMENT: ${environment}
+        cmd: |
+          chmod +x ./gcp_cloud_build_run.sh
+          ./gcp_cloud_build_run.sh
+        stdout: output
+      - log: "Deploy flow logs ::::::::::::> ${output}"
